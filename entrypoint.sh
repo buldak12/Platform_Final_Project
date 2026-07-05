@@ -9,6 +9,7 @@ echo "Waiting for PHP-FPM to start..."
 sleep 2
 
 echo "Starting Nginx..."
-nginx -g "daemon off;"
+nginx -g "daemon off;" &
+NGINX_PID=$!
 
-wait $PHP_PID
+wait $PHP_PID $NGINX_PID

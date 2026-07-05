@@ -7,7 +7,7 @@ services:
     volumes:
       - .:/app
     ports:
-      - "8000:8000"
+      - "8080:80"
     environment:
       DATABASE_URL: "mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@symfony-db:3306/${MYSQL_DATABASE}?serverVersion=8.0.32&charset=utf8mb4"
     depends_on:
