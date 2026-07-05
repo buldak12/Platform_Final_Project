@@ -3,215 +3,64 @@
 ## Part 1: Dockerfile Setup (1-2 minutes)
 
 ### Overview
-Our Dockerfile uses a **multi-stage build** approach to create an optimized Docker image for a Symfony PHP application with Nginx.
+Our Dockerfile uses a multi-stage build approach to create an optimized Docker image for a Symfony PHP application with Nginx. This technique allows us to keep the final image small by discarding the build stage dependencies after compilation.
 
 ### Stage 1: Builder Stage
-```dockerfile
-FROM php:8.3-fpm as builder
+The first stage starts with PHP 8.3 FPM as the base image and creates `/app` as the working directory. This stage is responsible for preparing all the dependencies and application code that we need.
 
-WORKDIR /app
-```
-- Uses PHP 8.3 FPM as the base image
-- Creates `/app` as the working directory
-- This stage prepares dependencies and application code
+First, we install the required system packages including git, unzip, curl, Node.js, and npm. We also install PHP extensions for `pdo` and `pdo_mysql` to enable database connectivity. After installation, we clean up the apt cache to reduce the image size. This step ensures we have all the tools needed to build our application.
 
-```dockerfile
-RUN apt-get update && apt-get install -y \
-    git \
-    unzip \
-    curl \
-    nodejs \
-    npm \
-    && docker-php-ext-install pdo pdo_mysql \
-    && rm -rf /var/lib/apt/lists/*
-```
-- Installs required system packages (git, unzip, curl, Node.js, npm)
-- Installs PHP extensions: `pdo` and `pdo_mysql` for database connectivity
-- Cleans up apt cache to reduce image size
+Next, we download and install Composer, which is the PHP dependency manager. This is installed globally so it can be accessed throughout the build process. We then copy the composer.json and composer.lock files into the container and run composer install to install all PHP dependencies. During this initial install, we skip scripts since we don't have the full application code yet.
 
-```dockerfile
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-```
-- Downloads and installs Composer (PHP dependency manager)
-- Makes it globally available
-
-```dockerfile
-COPY composer.json composer.lock ./
-RUN composer install --no-interaction --no-scripts --optimize-autoloader
-```
-- Copies dependency files
-- Installs PHP dependencies without running post-install scripts yet
-
-```dockerfile
-COPY . .
-RUN composer install --no-interaction --optimize-autoloader --no-ansi || true
-RUN php bin/console importmap:install --no-interaction
-RUN php bin/console cache:warmup --env=prod --no-debug || true
-```
-- Copies entire application code
-- Runs post-install scripts and builds optimized autoloader
-- Installs asset imports and warms up the production cache
+After that, we copy the entire application code into the container. We run composer install again to execute any post-install scripts that need the full application. We also run the importmap:install command to set up asset imports, and we warm up the production cache to improve startup performance. The `|| true` at the end of some commands means they won't fail the build if they encounter errors.
 
 ### Stage 2: Runtime Stage
-```dockerfile
-FROM php:8.3-fpm as runtime
+The second stage creates the final runtime image, starting fresh with PHP 8.3 FPM. This is separate from the builder stage, which means we only include what's necessary for running the application, not the build tools.
 
-WORKDIR /app
+In this stage, we install only the essential packages we need for the application to run: Nginx as the web server and curl for health checks. We also install the same PHP extensions for database connectivity. Then we copy the entire prepared application from the builder stage into this runtime image. Since we're only copying the finished application, the final image is much smaller than if we included all the build tools.
 
-RUN apt-get update && apt-get install -y \
-    nginx \
-    curl \
-    && docker-php-ext-install pdo pdo_mysql \
-    && rm -rf /var/lib/apt/lists/*
-```
-- Creates final runtime image with PHP 8.3 FPM
-- Installs only what's needed: Nginx web server and curl for health checks
-- Installs same PHP extensions
+We create the `/app/var` directory for cache and logs, and we set the ownership to `www-data`, which is the user that the web server runs as. We set permissions to 755 for most directories and 775 for the var directory to allow the web server to write cache and log files. This prevents permission-related errors at runtime.
 
-```dockerfile
-COPY --from=builder /app /app
-```
-- Copies entire prepared application from builder stage
-- This keeps the final image smaller (builder stage is discarded)
-
-```dockerfile
-RUN mkdir -p /app/var && \
-    chown -R www-data:www-data /app && \
-    chmod -R 755 /app && \
-    chmod -R 775 /app/var
-```
-- Creates var directory for cache and logs
-- Sets ownership to `www-data` (web server user)
-- Sets proper permissions (775 for var allows writing)
-
-```dockerfile
-COPY nginx-main.conf /etc/nginx/nginx.conf
-COPY nginx.conf /etc/nginx/conf.d/symfony.conf
-```
-- Copies Nginx configuration files
-
-```dockerfile
-EXPOSE 8080
-
-CMD ["sh", "-c", "php bin/console doctrine:migrations:migrate --no-interaction || true && php-fpm -D && nginx -g 'daemon off;'"]
-```
-- Exposes port 8080 (Railway's dynamic port)
-- **Startup command:**
-  1. Runs database migrations (with || true to ignore errors)
-  2. Starts PHP-FPM as daemon (`-D` flag)
-  3. Starts Nginx in foreground mode (keeps container alive)
+We then copy the Nginx configuration files that tell the web server how to handle requests. Finally, we expose port 8080, which is compatible with Railway's dynamic port assignment system. The startup command runs three important tasks: first it attempts to run database migrations to set up the database schema, then it starts PHP-FPM as a daemon process, and finally it starts Nginx in the foreground to keep the container running. The `|| true` after migrations means the container will still start even if migrations fail, which prevents the application from crashing if migrations have already been run.
 
 ---
 
 ## Part 2: Nginx Configuration (1-2 minutes)
 
 ### Overview
-Nginx acts as a reverse proxy, serving static files directly and forwarding PHP requests to PHP-FPM.
+Nginx serves as the web server and reverse proxy for our application. It acts as the entry point for all requests, deciding whether to serve static files directly or forward PHP requests to PHP-FPM for processing.
 
-```nginx
-server {
-    listen 8080 default_server;
-    root /app/public;
-    index index.php;
-```
-- Listens on port 8080
-- Sets document root to `/app/public` (Symfony's public directory)
-- Default index file is `index.php`
+### Server Configuration
+The Nginx server listens on port 8080 and sets the document root to `/app/public`, which is Symfony's public directory. The default index file is set to `index.php`. We also configure logging to track all requests and errors, which is helpful for debugging production issues.
 
-```nginx
-access_log /var/log/nginx/access.log;
-error_log /var/log/nginx/error.log warn;
-```
-- Logs all requests and errors
-- Helps with debugging
+### Security Headers
+We add several security headers to protect the application from common web attacks. The `X-Frame-Options` header prevents clickjacking attacks by restricting how the site can be framed. The `X-Content-Type-Options` header prevents browsers from trying to guess the content type of responses. The `X-XSS-Protection` header provides protection against cross-site scripting attacks.
 
-```nginx
-add_header X-Frame-Options "SAMEORIGIN" always;
-add_header X-Content-Type-Options "nosniff" always;
-add_header X-XSS-Protection "1; mode=block" always;
-```
-- Security headers to protect against common web attacks
+### Static Asset Serving
+When requests come in for static assets like CSS, JavaScript, and images in the `/assets/` directory, Nginx serves them directly without involving PHP. These responses include cache headers that tell browsers to cache the assets for one year. This means users won't have to re-download unchanged files, significantly improving performance and reducing server load.
 
-```nginx
-location ~ ^/assets/ {
-    expires 1y;
-    add_header Cache-Control "public, immutable";
-    try_files $uri =404;
-}
-```
-- **Static Assets:** Serves assets (CSS, JS, images) with 1-year cache
-- Browser won't re-download unchanged files
+### Security Rules
+We implement several security rules to protect sensitive files. The `.well-known` directory is allowed for SSL certificate verification. All hidden files and directories starting with a dot are blocked from being accessed. Files ending with a tilde, which are typically backup files, are also blocked. These rules prevent accidental exposure of configuration files and other sensitive data.
 
-```nginx
-location ~ /\.well-known {
-    allow all;
-}
+### URL Rewriting for Symfony
+When a request comes in for a regular URL, Nginx first checks if the file or directory exists. If it doesn't exist, it forwards the request to `index.php` with all the original query string parameters. This enables Symfony's routing system to work properly, allowing the framework to handle all URLs through a single entry point.
 
-location ~ /\. {
-    deny all;
-}
-
-location ~ ~$ {
-    deny all;
-}
-```
-- Security rules:
-  - Allow `.well-known` (for SSL certificates)
-  - Block all hidden files (starting with .)
-  - Block backup files (ending with ~)
-
-```nginx
-location / {
-    try_files $uri $uri/ /index.php$is_args$args;
-}
-```
-- **URL Rewriting:** Symfony routing
-- Tries to serve the file/directory
-- If not found, forwards to `index.php` (Symfony's front controller)
-- Preserves query strings
-
-```nginx
-location ~ ^/index\.php {
-    fastcgi_pass localhost:9000;
-    fastcgi_split_path_info ^(.+\.php)(/.+)$;
-    include fastcgi_params;
-    
-    fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
-```
-- **PHP Handler:** Forwards requests to PHP-FPM on port 9000
-- `fastcgi_split_path_info`: Properly handles PATH_INFO for routing
-- `fastcgi_params`: Includes standard FastCGI parameters
-- Sets correct script filename for PHP execution
+### PHP Request Handling
+When Nginx receives a request for `index.php`, it forwards it to PHP-FPM running on port 9000. The `fastcgi_split_path_info` directive properly handles the PATH_INFO variable needed for routing. We include the standard FastCGI parameters and set the SCRIPT_FILENAME to the correct absolute path so PHP knows which file to execute. This communication between Nginx and PHP-FPM is what allows the web server to run PHP code.
 
 ---
 
 ## How They Work Together
 
-```
-User Request
-    ↓
-[Nginx - Port 8080]
-    ↓
-  Static file?  → Serve directly (CSS, JS, images)
-    ↓
-  PHP file?     → Forward to PHP-FPM (port 9000)
-    ↓
-[PHP-FPM]
-    ↓
-[Symfony Application]
-    ↓
-  Response returned to Nginx
-    ↓
-  Response sent to user
-```
+When a user makes a request to the application, the request arrives at Nginx on port 8080. Nginx then checks if the request is for a static file. If it is, Nginx serves the file directly from the filesystem. If the request is for a PHP page or API endpoint, Nginx forwards it to PHP-FPM running on port 9000. PHP-FPM executes the Symfony application code and generates a response. This response is then sent back through Nginx to the user's browser.
+
+This architecture provides several benefits. Nginx is much faster at serving static content than PHP, so separating static and dynamic content improves performance. PHP-FPM handles multiple concurrent requests efficiently. The separation also allows these components to be scaled independently if needed in the future.
+
+---
 
 ## Key Points
 
-✅ **Multi-stage build** keeps final image small  
-✅ **Nginx + PHP-FPM** better performance than built-in servers  
-✅ **Proper permissions** prevent permission errors  
-✅ **Auto-migrations** run on container startup  
-✅ **Security headers** protect the application  
-✅ **URL rewriting** enables clean Symfony routing  
-✅ **Port 8080** compatible with Railway's dynamic port assignment  
+The multi-stage build approach keeps the final Docker image as small as possible by including only runtime dependencies, not build tools. The Nginx and PHP-FPM combination provides better performance and scalability than using a built-in PHP development server. Proper file permissions ensure the web server can write cache and log files without encountering permission errors. The automatic database migrations run on container startup, so the database schema is set up before the application starts handling requests.
+
+Security headers protect the application from common web attacks without adding complexity. The URL rewriting configuration enables clean Symfony routing with friendly URLs. Listening on port 8080 ensures compatibility with Railway's dynamic port assignment system. All of these design choices work together to create a production-ready containerized application that is secure, performant, and easy to deploy on Railway.
 
