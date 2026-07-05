@@ -59,4 +59,4 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "php-fpm -D && nginx -g 'daemon off;'"]
+CMD ["sh", "-c", "php bin/console doctrine:migrations:migrate --no-interaction && php-fpm -D && nginx -g 'daemon off;'"]
