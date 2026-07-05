@@ -57,6 +57,6 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
     CMD curl -f http://localhost/ || exit 1
 
-EXPOSE 80
+EXPOSE 8080
 
 CMD ["sh", "-c", "php-fpm -D && nginx -g 'daemon off;'"]
